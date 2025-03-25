@@ -189,6 +189,74 @@ class Page:
             self.tree_segments.append(tree_segment)
             counter += 1
 
+    # Utility function to merge repeated components in paths
+    def _merge_repeated_path_components(self, path_components):
+        """Merge repeated path components (e.g., 'about/about/about' -> 'about')"""
+        result = []
+        for comp in path_components:
+            # Only add if it's not the same as the previous component (case insensitive)
+            if not result or comp.lower() != result[-1].lower():
+                result.append(comp)
+        return result
+
+    # Function 1: Generate URI path (redirect URL)
+    def _generate_uri_path(self, page_num=None):
+        """Generate the URI that redirects to the source path"""
+        if not self.page_url:
+            # If no URL, use the file path
+            return self.pagename + (f"#page={page_num}" if page_num is not None else "")
+        return self.page_url + (f"#page={page_num}" if page_num is not None else "")
+
+    # Function 2: Generate LLM reference path
+    def _generate_llm_path(self, headers, count):
+        """Generate path for LLM with file path divided by "/" and headers by ">"""
+        # Split and clean file path
+        file_path_parts = self.pagename.split('/')
+        file_path_parts = self._merge_repeated_path_components(file_path_parts)
+        
+        # For LLM path, we just use the clean parts
+        file_path = '/'.join(part for part in file_path_parts if part and not part.isspace())
+        
+        # Clean and filter headers, merging consecutive identical headers
+        clean_headers = []
+        prev_header = None
+        for h in headers:
+            if h and not h.isspace() and h != prev_header:
+                clean_headers.append(h)
+                prev_header = h
+        
+        # Combine paths with appropriate separators
+        path = file_path
+        if clean_headers:
+            path += f" > {' > '.join(clean_headers)}"
+            
+        return f"{path} ({count})"
+
+    # Function 3: Generate human-readable path
+    def _generate_human_path(self, headers, count):
+        """Generate human-readable path showing filename and headers"""
+        # Get just the filename from the last part of the path
+        file_path_parts = self.pagename.split('/')
+        file_name = file_path_parts[-1] if file_path_parts else ""
+        
+        # Clean the filename
+        file_name = self._clean_path_component(file_name)
+        
+        # Clean and filter headers, merging consecutive identical headers
+        clean_headers = []
+        prev_header = None
+        for h in headers:
+            if h and not h.isspace() and h != prev_header:
+                clean_headers.append(h)
+                prev_header = h
+        
+        # Combine paths
+        path = file_name
+        if clean_headers:
+            path += f" > {' > '.join(clean_headers)}"
+        
+        return f"{path} ({count})"
+
     def tree_segments_to_chunks(self):
         for segment in self.tree_segments:
             segment_title = segment['Page_path'][-1] if segment['Page_path'] else "(NO TITLE)"
@@ -196,25 +264,25 @@ class Page:
             page_num = segment.get('page_num', None)
             for count, content_chunk in enumerate(content_chunks):
                 headers = segment['Page_path']
-                if self.page_url != "":
-                    if page_num is not None:
-                        urls = f"{self.page_url}#page={page_num}"
-                    else:
-                        urls = self.page_url
-                else:
-                    urls = ""
-                # if self.page_url and page_num:
-                #     urls = f"{self.page_url}#page={page_num}"
-                # else:
-                #     urls = "URL_NOT_AVAILABLE"
-                page_path = ' > '.join(
-                    f"{item} (h{i + 1})" for i, item in enumerate(segment['Page_path'])) + f" ({count})"
+                
+                # Generate all three path types
+                # 1. URL that redirects to source
+                uri_path = self._generate_uri_path(page_num)
+                # 2. LLM reference path
+                llm_path = self._generate_llm_path(headers, count)
+                # 3. Human-readable path
+                human_path = self._generate_human_path(headers, count)
+                
                 self.chunks.append(
                     Chunk(
                         content=content_chunk,
                         titles=segment_title,
-                        chunk_url=urls,
-                        # metadata={"page_path": page_path},  # Include page_path in metadata
+                        chunk_url=uri_path,  # Use URI path as the chunk URL
+                        metadata={
+                            "uri_path": uri_path,
+                            "llm_path": llm_path,
+                            "human_path": human_path
+                        },  # Store all path types in metadata
                         page_num=page_num
                     )
                 )
