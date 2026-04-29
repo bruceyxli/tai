@@ -17,7 +17,6 @@ from file_conversion_router.conversion.ed_converter import EdConverter
 from file_conversion_router.conversion.html_converter import HtmlConverter
 from file_conversion_router.conversion.md_converter import MarkdownConverter
 from file_conversion_router.conversion.notebook_converter import NotebookConverter
-from file_conversion_router.conversion.pdf_converter import PdfConverter
 from file_conversion_router.conversion.python_converter import PythonConverter
 from file_conversion_router.conversion.rst_converter import RstConverter
 from file_conversion_router.conversion.video_converter import VideoConverter
@@ -37,7 +36,7 @@ ConverterMapping = Dict[str, Type[BaseConverter]]
 
 # Mapping from file extensions to their corresponding conversion classes
 converter_mapping: ConverterMapping = {
-    ".pdf": PdfConverter,
+    ".pdf": None,  # PdfConverter loaded lazily to avoid mineru import chain at startup
     ".md": MarkdownConverter,
     ".rst": RstConverter,
     ".mp4": VideoConverter,
@@ -60,6 +59,7 @@ def process_single_file(
         conn: sqlite3.Connection,
         input_root: Union[str, Path] = None,
         file_uuid: str = None,
+        save_smart_reading_json: bool = True,
 ) -> Tuple[List[Chunk], dict, str]:
     """
     Process a single file through the conversion pipeline.
@@ -122,6 +122,9 @@ def process_single_file(
 
     # Get converter class
     converter_class = converter_mapping.get(input_file_path.suffix)
+    if converter_class is None and input_file_path.suffix == ".pdf":
+        from file_conversion_router.conversion.pdf_converter import PdfConverter
+        converter_class = PdfConverter
 
     # Generate file UUID from hash if not provided
     if not file_uuid:
@@ -144,11 +147,13 @@ def process_single_file(
     url = ""
     description = ""
     recap_questions = []
+    smart_reading = None
     if isinstance(metadata, dict):
         sections = metadata.get("sections", []) or []
         recap_questions = metadata.get("recap_questions", [])
         url = metadata.get("URL", "")
         description = metadata.get("file_description", "")
+        smart_reading = metadata.get("smart_reading") or None
 
     # Read extra info from json file if present
     extra_info = []
@@ -174,7 +179,18 @@ def process_single_file(
         file_description=description,
         extra_info=extra_info,
         url=url,
+        smart_reading=smart_reading,
     )
+
+    # Save smart_reading as a sidecar JSON file if enabled
+    if save_smart_reading_json and smart_reading:
+        sr_json_path = output_file_path / f"{input_file_path.name}_smart_reading.json"
+        try:
+            with sr_json_path.open("w", encoding="utf-8") as f:
+                json.dump(smart_reading, f, ensure_ascii=False, indent=2)
+            logging.info(f"Saved smart reading JSON: {sr_json_path}")
+        except Exception as e:
+            logging.warning(f"Failed to save smart reading JSON for {input_file_path.name}: {e}")
 
     # Process sentence mapping for PDF files
     if input_file_path.suffix == ".pdf":
@@ -241,6 +257,7 @@ def process_folder(
         db_path: Union[str, Path] = None,
         generate_embeddings: bool = False,
         embedding_model: str = "Qwen/Qwen3-Embedding-4B",
+        save_smart_reading_json: bool = True,
 ) -> None:
     """Walk through the input directory and schedule conversion tasks for specified file types."""
     logging.getLogger().setLevel(logging.INFO)
@@ -325,11 +342,13 @@ def process_folder(
         url = ""
         description = ""
         recap_questions = []
+        smart_reading = None
         if isinstance(metadata, dict):
             sections = metadata.get("sections", []) or []
             recap_questions = metadata.get("recap_questions", [])
             url = metadata.get("URL", "")
             description = metadata.get("file_description", "")
+            smart_reading = metadata.get("smart_reading") or None
 
         # read extra info from json file if present
         extra_info = []
@@ -353,7 +372,18 @@ def process_folder(
             file_description=description,
             extra_info=extra_info,
             url=url,
+            smart_reading=smart_reading,
         )
+
+        # Save smart_reading as a sidecar JSON file if enabled
+        if save_smart_reading_json and smart_reading:
+            sr_json_path = output_file_path / f"{input_file_path.name}_smart_reading.json"
+            try:
+                with sr_json_path.open("w", encoding="utf-8") as f:
+                    json.dump(smart_reading, f, ensure_ascii=False, indent=2)
+                logging.info(f"Saved smart reading JSON: {sr_json_path}")
+            except Exception as e:
+                logging.warning(f"Failed to save smart reading JSON for {input_file_path.name}: {e}")
 
         # Process sentence mapping for PDF files
         if input_file_path.suffix == ".pdf":
@@ -586,6 +616,7 @@ def upsert_file_meta(conn: sqlite3.Connection, f: dict):
     Expects keys: uuid, file_hash, sections, relative_path, course_code, course_name, file_name, description
     Optional keys: created_at (if not provided, uses current time via COALESCE)
     """
+    smart_reading = f.get("smart_reading")
     args = (
         f["uuid"],
         f["file_hash"],
@@ -596,6 +627,7 @@ def upsert_file_meta(conn: sqlite3.Connection, f: dict):
         f.get("file_name"),
         f.get("description", ""),  # Fixed: changed from "file_description" to "description"
         json.dumps(f.get("extra_info", {}), ensure_ascii=False) if f.get("extra_info") else None,
+        json.dumps(smart_reading, ensure_ascii=False) if smart_reading else "",
         f.get("url"),
         f.get("created_at"),  # Pass created_at if available, otherwise None (COALESCE will use current time)
     )
@@ -712,7 +744,8 @@ def write_chunks_to_db(conn: sqlite3.Connection,
                        sections: list | str | None = None,
                        file_description: str = None,
                        extra_info: list = None,
-                       url: str = None,) -> str:
+                       url: str = None,
+                       smart_reading: list | None = None,) -> str:
     """
     Write chunks and bind file row. Returns file_uuid.
     """
@@ -749,6 +782,7 @@ def write_chunks_to_db(conn: sqlite3.Connection,
         "file_name": file_name,
         "description": file_description or "",
         "extra_info": extra_info,
+        "smart_reading": smart_reading,
         "url": url or "",
     })
 
@@ -852,6 +886,7 @@ CREATE TABLE IF NOT EXISTS file (
   file_name    TEXT,
   description  TEXT,
   extra_info   TEXT,
+  smart_reading TEXT DEFAULT '',
   url          TEXT,
   vector       BLOB,
   created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
@@ -901,8 +936,8 @@ CREATE TABLE IF NOT EXISTS module (
 CREATE INDEX IF NOT EXISTS idx_module_course ON module(course_code);
 """
 SQL_UPSERT_FILE = """
-INSERT INTO file (uuid, file_hash, sections, relative_path, course_code, course_name, file_name, description, extra_info, url, created_at, update_time)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now', 'localtime')), datetime('now', 'localtime'))
+INSERT INTO file (uuid, file_hash, sections, relative_path, course_code, course_name, file_name, description, extra_info, smart_reading, url, created_at, update_time)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now', 'localtime')), datetime('now', 'localtime'))
 ON CONFLICT(uuid) DO UPDATE SET
   file_hash     = excluded.file_hash,
   sections      = excluded.sections,
@@ -912,6 +947,7 @@ ON CONFLICT(uuid) DO UPDATE SET
   file_name     = excluded.file_name,
   description   = excluded.description,
   extra_info    = excluded.extra_info,
+  smart_reading = excluded.smart_reading,
   url           = excluded.url,
   update_time   = datetime('now', 'localtime');
 """

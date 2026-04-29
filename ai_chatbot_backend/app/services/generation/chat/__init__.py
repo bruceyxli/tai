@@ -17,6 +17,7 @@ async def run_chat_pipeline(
     timer: Optional[RequestTimer] = None,
     audio_text: Optional[str] = None,
     module_path: Optional[str] = None,
+    rag: bool = True,
 ):
     """
     Regular chat pipeline: query -> generate -> handler.
@@ -33,6 +34,7 @@ async def run_chat_pipeline(
         course, engine, sid, timer,
         audio_response=audio_response,
         module_path=module_path,
+        rag=rag,
     )
 
     # Step 2: Generate — call LLM
@@ -55,5 +57,6 @@ async def run_chat_pipeline(
         course_code=course,
         audio_text=audio_text,
         timer=timer,
+        reformulated_query=context.reformulated_query,
     )
     return handler.run()

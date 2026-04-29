@@ -69,6 +69,11 @@ class AudioTranscript(BaseEvt):
     type: Literal["response.transcript"] = "response.transcript"
     text: str = Field(min_length=1)
 
+class DebugInfo(BaseEvt):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["response.debug"] = "response.debug"
+    reformulated_query: Optional[str] = None
+
 class Done(BaseEvt):
     model_config = ConfigDict(extra="forbid")
     type: Literal["done"] = "done"

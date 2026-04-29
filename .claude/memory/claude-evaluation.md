@@ -272,6 +272,88 @@ ls -la output/evaluation_dataset_*.json
 make test-no-api
 ```
 
+---
+
+## Model Evaluation Pipeline (`evaluation/model_eval/`)
+
+End-to-end evaluation of the TAI backend with a real vLLM model. Tests answer quality, RAG retrieval, and query reformulation.
+
+### Key Files
+- `evaluation/model_eval/eval_runner.py` — Single-turn eval: sends 30 CS 61A questions, records answers, reasoning, references, latency
+- `evaluation/model_eval/eval_multiturn.py` — Multi-turn eval: 3 conversations × 3 turns each, tests query reformulation across turns
+- `evaluation/model_eval/configs/qwen3_5_27b_awq.json` — Model config (backend URL, auth token, timeouts)
+- `evaluation/model_eval/questions/cs61a_questions.json` — 30 single-turn questions (basic/intermediate/advanced)
+- `evaluation/model_eval/questions/cs61a_multiturn.json` — 3 multi-turn conversation scripts
+- `evaluation/model_eval/output/` — JSON results from each run
+
+### Running the Pipelines
+```bash
+cd evaluation/model_eval
+
+# Single-turn (30 questions, ~20-25 min)
+python eval_runner.py -c configs/qwen3_5_27b_awq.json
+
+# Multi-turn (3 conversations × 3 turns, ~8-12 min)
+python eval_multiturn.py -c configs/qwen3_5_27b_awq.json
+
+# Run specific questions only
+python eval_runner.py -c configs/qwen3_5_27b_awq.json --ids q01 q05 q10
+
+# Run both RAG modes
+python eval_runner.py -c configs/qwen3_5_27b_awq.json --rag-mode both
+```
+
+### Config Parameters (`configs/qwen3_5_27b_awq.json`)
+```json
+{
+  "timeout_seconds": 180,
+  "delay_between_requests_seconds": 2
+}
+```
+
+### Output Format
+Each result includes: `question`, `answer`, `reasoning`, `references`, `reformulated_query`, timing metrics, `status`.
+
+### Key Findings & Fixes Applied
+
+#### Context Length (Critical)
+- **Model actual context limit: 8192 tokens** (not 10000 as `--max-model-len` suggests)
+- Input prompt with RAG docs can reach 4000-4500 tokens
+- **Fix**: Set `max_tokens=3000` in `SAMPLING_PARAMS` (4500+3000=7500 < 8192)
+- If `max_tokens=4000`, triggers `400 BadRequestError` → eval sees 180s timeout
+
+#### Thinking Budget (Important)
+- With `--reasoning-parser deepseek_r1`, `max_tokens` only controls **answer tokens**, reasoning is separate
+- Without a thinking budget, model can generate 12000-16000ch of reasoning → `answer=0ch`
+- **Fix**: Use `chat_template_kwargs: {"thinking_budget": 2048}` in `extra_body` (NOT `max_thinking_tokens` which is ignored)
+- Current setting: `ai_chatbot_backend/app/services/generation/model_call.py` → `SAMPLING_PARAMS`
+
+#### vLLM Client Timeout
+- `AsyncOpenAI` has no timeout by default (600s)
+- If vLLM hangs on reformulation, backend waits indefinitely while eval client times out at 180s
+- **Fix**: `timeout=60.0` in `get_vllm_chat_client()` (`app/dependencies/model.py`)
+
+#### Query Reformulation Behavior
+- Turn 1: never reformulated (bypass — no conversation context yet)
+- Turn 2+: reformulation resolves pronouns and adds context (e.g., "this concept" → full topic)
+- All reformulation calls use `SAMPLING_PARAMS_NO_THINK` (`enable_thinking: False`) — fast and reliable
+
+### Correct `SAMPLING_PARAMS` (as of last fix)
+```python
+SAMPLING_PARAMS = {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "max_tokens": 3000,
+    "extra_body": {
+        "top_k": 20,
+        "min_p": 0,
+        "chat_template_kwargs": {"thinking_budget": 2048},
+    }
+}
+```
+
+---
+
 ## Integration with TAI Components
 
 ### Backend Integration

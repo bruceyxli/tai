@@ -65,7 +65,8 @@ with db:
             relative_path TEXT DEFAULT '' UNIQUE NOT NULL, -- relative path to the file in the course directory
             course_code TEXT DEFAULT '', -- course code, e.g. "CS61A"
             course_name TEXT DEFAULT '',  -- course name, e.g. "CS61A: Structure and Interpretation of Computer Programs"
-            extra_info TEXT DEFAULT '' -- any extra info, JSON
+            extra_info TEXT DEFAULT '', -- any extra info, JSON
+            smart_reading TEXT DEFAULT '' -- JSON: [{title, start_time, end_time, content}], video only
         );
 
         /* one row per question --------------------------------------------- */
@@ -114,8 +115,8 @@ def ingest(files: List[Dict[str, Any]]) -> None:
                 continue
         db.execute(
             """
-            INSERT INTO file (uuid, file_name, file_description, url, sections, relative_path, course_code, course_name, extra_info)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO file (uuid, file_name, file_description, url, sections, relative_path, course_code, course_name, extra_info, smart_reading)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid := gen_uuid(),
@@ -126,7 +127,8 @@ def ingest(files: List[Dict[str, Any]]) -> None:
                 f['file_path'],
                 f.get('course_id') or f.get('course_code') or '',
                 f['course_name'],
-                jdump(extra_info, default=None)
+                jdump(extra_info, default=None),
+                '',  # smart_reading: populated by pipeline, not YAML ingestion
             ),
         )
 

@@ -166,14 +166,21 @@ def _get_file_desc_index(course: str) -> Dict[str, Any]:
     if cached is not None and cached["dv"] == dv_now and cached.get("M") is not None:
         return cached
 
-    with _get_cursor() as cur:
-        rows = cur.execute("""
-            SELECT uuid, file_name, description, vector
-            FROM file
-            WHERE course_code = ?
-              AND description IS NOT NULL AND description != ''
-              AND vector IS NOT NULL;
-        """, (course,)).fetchall()
+    try:
+        with _get_cursor() as cur:
+            rows = cur.execute("""
+                SELECT uuid, file_name, description, vector
+                FROM file
+                WHERE course_code = ?
+                  AND description IS NOT NULL AND description != ''
+                  AND vector IS NOT NULL;
+            """, (course,)).fetchall()
+    except Exception as e:
+        print(f"[INFO] File description index unavailable for {course}: {e}")
+        idx = {"dv": dv_now, "M": None}
+        with _desc_lock:
+            _desc_cache[course] = idx
+        return idx
 
     file_uuids, file_names, descriptions, vectors = [], [], [], []
     dim = None
@@ -373,7 +380,7 @@ def _get_references_from_sql(
         return [], [], [], [], [], [], [],[], []
     # Get the course index from the cache or build it if not present or stale
     idx = _get_course_index(course, module_path=module_path, file_uuid=file_uuid)
-    if not idx.get("M") is not None:
+    if idx.get("M") is None:
         return [], [], [], [], [], [], [],[], []
     # Compute the scores for each document in the index
     document_matrix = idx["M"]
@@ -468,13 +475,17 @@ def _build_course_index(
         where += " AND file_path LIKE ?"
         params.append(f"{module_path}/%")
     # Use a context manager to get SQL-DB cursor to ensure the connection is closed properly
-    with _get_cursor() as cur:
-        dv = cur.execute("PRAGMA data_version").fetchone()[0]
-        rows = cur.execute(f"""
-            SELECT chunk_uuid, file_path, reference_path, vector, title, text, url, file_uuid, idx
-            FROM chunks
-            {where};
-        """, params).fetchall()
+    try:
+        with _get_cursor() as cur:
+            dv = cur.execute("PRAGMA data_version").fetchone()[0]
+            rows = cur.execute(f"""
+                SELECT chunk_uuid, file_path, reference_path, vector, title, text, url, file_uuid, idx
+                FROM chunks
+                {where};
+            """, params).fetchall()
+    except Exception as e:
+        print(f"[INFO] Chunks index unavailable for {course}: {e}")
+        return {"dv": 0, "M": None}
     # Process the rows fetched from the database
     chunk_uuids, file_paths, reference_paths, titles, texts, urls, vectors, file_uuids, chunk_idxs = [], [], [], [], [], [], [], [], []
     dim = None

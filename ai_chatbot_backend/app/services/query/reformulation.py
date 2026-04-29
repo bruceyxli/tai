@@ -38,6 +38,7 @@ async def build_retrieval_query(
     file_sections: Any = None,
     excerpt: Any = None,
     course_descriptions: Any = None,
+    conversation_history: Any = None,
 ) -> str:
     """
     Reformulate the latest user request into a single self-contained query string,
@@ -48,10 +49,14 @@ async def build_retrieval_query(
     system_prompt = _QUERY_REFORMULATOR_PROMPT
 
     # If no context is provided, return the original user message
-    if not memory_synopsis and not file_sections and not excerpt and not course_descriptions:
+    if not memory_synopsis and not file_sections and not excerpt and not course_descriptions and not conversation_history:
+        print(f"[DEBUG] Reformulation bypass (no context): '{user_message[:80]}'")
         return user_message
 
     request_parts = []
+
+    if conversation_history:
+        request_parts.append(f"Conversation History:\n{conversation_history}\n")
 
     if memory_synopsis:
         request_parts.append(f"Memory Synopsis:\n{memory_synopsis}\n")
@@ -83,15 +88,17 @@ async def build_retrieval_query(
 
     print(f"[DEBUG] Reformulation input ({len(request_content)} chars):\n{request_content[:2000]}...")
 
+    from app.services.generation.model_call import SAMPLING_PARAMS_NO_THINK
+
     client = _get_reformulation_client()
     response = await client.chat.completions.create(
         model=settings.vllm_chat_model,
         messages=chat,
-        temperature=0.6,
-        top_p=0.95,
-        max_tokens=512,
+        temperature=SAMPLING_PARAMS_NO_THINK["temperature"],
+        top_p=SAMPLING_PARAMS_NO_THINK["top_p"],
+        max_tokens=SAMPLING_PARAMS_NO_THINK["max_tokens"],
         timeout=30.0,
-        extra_body={"top_k": 20, "min_p": 0, "chat_template_kwargs": {"enable_thinking": False}},
+        extra_body=SAMPLING_PARAMS_NO_THINK["extra_body"],
     )
     msg = response.choices[0].message
     content = msg.content or ""

@@ -16,6 +16,7 @@ class ChatContext:
     """Result of the query step for regular chat mode."""
     messages: List[Message]
     reference_list: List[Tuple]
+    reformulated_query: str = ""
 
 
 async def build_chat_context(
@@ -29,6 +30,7 @@ async def build_chat_context(
     timer: Optional[RequestTimer],
     audio_response: bool = False,
     module_path: Optional[str] = None,
+    rag: bool = True,
 ) -> ChatContext:
     """
     Step 1: Build the complete prompt context for regular (non-tutor) chat mode.
@@ -49,6 +51,14 @@ async def build_chat_context(
 
     user_message = messages[-1].content
     messages[-1].content = ""
+
+    # Extract prior conversation turns for reformulation (skip system prompt at [0] and current user at [-1])
+    prior_turns = messages[1:-1]
+    conversation_history = None
+    if prior_turns:
+        conversation_history = "\n".join(
+            f"{m.role}: {m.content}" for m in prior_turns if m.content
+        )
 
     t0 = time.time()
 
@@ -88,11 +98,12 @@ async def build_chat_context(
     if timer:
         timer.mark("query_reformulation_start")
 
-    course_descriptions = get_relevant_file_descriptions(user_message, course) if course else None
+    course_descriptions = get_relevant_file_descriptions(user_message, course) if (course and rag) else None
 
     query_message = await build_retrieval_query(user_message, previous_memory,
                                                 filechat_file_sections, filechat_focused_chunk,
-                                                course_descriptions=course_descriptions)
+                                                course_descriptions=course_descriptions,
+                                                conversation_history=conversation_history)
 
     if timer:
         timer.mark("query_reformulation_end")
@@ -104,7 +115,7 @@ async def build_chat_context(
         user_message,
         course if course else "",
         0.32,  # threshold
-        True,  # rag enabled
+        rag,  # rag enabled
         top_k=7,
         problem_content=problem_content,
         answer_content=answer_content,
@@ -118,4 +129,4 @@ async def build_chat_context(
     messages[-1].content += modified_message
     messages[0].content = system_add_message
 
-    return ChatContext(messages=messages, reference_list=reference_list)
+    return ChatContext(messages=messages, reference_list=reference_list, reformulated_query=query_message)

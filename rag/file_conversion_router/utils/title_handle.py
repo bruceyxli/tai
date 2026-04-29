@@ -1779,4 +1779,305 @@ def get_next_start_time(transcript_list: List[Dict[str, Any]], position: int) ->
     """Get the start time of the next entry."""
     if position >= len(transcript_list):
         return get_previous_end_time(transcript_list, position)
+
+
+# ========================
+# Smart Reading Generation
+# ========================
+
+def _get_smart_reading_client() -> OpenAI:
+    """Return an OpenAI-compatible client for smart reading generation.
+
+    Uses local vLLM when VLLM_BASE_URL is set, otherwise falls back to OpenAI.
+    """
+    vllm_base_url = os.getenv("VLLM_BASE_URL")
+    if vllm_base_url:
+        api_key = os.getenv("VLLM_API_KEY", "placeholder")
+        return OpenAI(base_url=vllm_base_url, api_key=api_key)
+    api_key = get_openai_api_key()
+    return OpenAI(api_key=api_key)
+
+
+def _merge_short_segments(
+    segments: List[Dict[str, Any]],
+    min_duration_sec: float = 10.0,
+    min_words: int = 15,
+) -> List[Dict[str, Any]]:
+    """Pre-merge consecutive segments that are too short to stand alone.
+
+    This runs BEFORE LLM processing so that timestamps are determined
+    algorithmically (not by the LLM). Each merged group keeps:
+      - start time = first segment's start time
+      - end time   = last segment's end time
+      - text content = concatenated text of all merged segments
+
+    A segment is considered "too short" if BOTH its duration is below
+    min_duration_sec AND its word count is below min_words.
+    Short segments are merged into the previous group; if there is no
+    previous group the segment is merged into the next one.
+    """
+    if not segments:
+        return []
+
+    def is_short(seg: Dict[str, Any]) -> bool:
+        duration = float(seg.get("end time", 0)) - float(seg.get("start time", 0))
+        words = len(seg.get("text content", "").split())
+        return duration < min_duration_sec and words < min_words
+
+    def merge_group(group: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Collect unique speakers in order of appearance
+        speakers_seen: List[str] = []
+        for s in group:
+            sp = str(s.get("speaker", ""))
+            if sp and sp not in speakers_seen:
+                speakers_seen.append(sp)
+        speaker_val: Any = speakers_seen[0] if len(speakers_seen) == 1 else speakers_seen
+        return {
+            "start time": group[0].get("start time", 0),
+            "end time": group[-1].get("end time", 0),
+            "speaker": speaker_val,
+            "text content": " ".join(s.get("text content", "") for s in group),
+        }
+
+    # Pass 1: greedily merge short segments into their predecessor
+    groups: List[List[Dict[str, Any]]] = []
+    for seg in segments:
+        if groups and is_short(seg):
+            groups[-1].append(seg)
+        else:
+            groups.append([seg])
+
+    # Pass 2: any group that is still too short (e.g., very first segment was
+    # short and had no predecessor) gets merged forward into the next group
+    merged: List[List[Dict[str, Any]]] = []
+    for grp in groups:
+        candidate = merge_group(grp)
+        if merged and is_short(candidate):
+            # Still short → merge into previous
+            merged[-1].extend(grp)
+        else:
+            merged.append(grp)
+
+    return [merge_group(g) for g in merged]
+
+
+def _split_transcript_into_batches(
+    segments: List[Dict[str, Any]],
+    batch_duration_sec: float = 1200.0,
+) -> List[List[Dict[str, Any]]]:
+    """Split transcript segments into time-based batches (~20 min each by default).
+
+    Keeps each LLM call within a reasonable token budget for long lectures.
+    """
+    if not segments:
+        return []
+    batches: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    batch_start = float(segments[0].get("start time", 0))
+    for seg in segments:
+        t = float(seg.get("start time", 0))
+        if t - batch_start >= batch_duration_sec and current:
+            batches.append(current)
+            current = [seg]
+            batch_start = t
+        else:
+            current.append(seg)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _process_smart_reading_batch(
+    batch: List[Dict[str, Any]],
+    client: OpenAI,
+    model: str,
+) -> List[Dict[str, Any]]:
+    """Call LLM to convert one batch of spoken transcript segments → formal sections.
+
+    Each input segment produces exactly one output section with matching timestamps.
+    Returns a list of {title, start_time, end_time, content} dicts.
+    """
+    n = len(batch)
+    segments_text = json.dumps(batch, ensure_ascii=False, indent=2)
+    prompt = (
+        "You are an expert academic editor who converts raw lecture transcripts into "
+        "high-density study notes. Your primary objective is maximum information density: "
+        "preserve every technical concept while aggressively eliminating all oral redundancy.\n\n"
+        "LANGUAGE RULE: Detect the language of the input transcript and write the title and "
+        "content in that same language. Do not translate.\n\n"
+        "Convert the following video lecture transcript segments into dense academic lecture notes.\n\n"
+        f"CRITICAL STRUCTURAL RULE: There are exactly {n} input segment(s). "
+        f"You MUST return exactly {n} output section(s) in the same order. "
+        "Do NOT merge, split, or reorder segments. Each output section corresponds "
+        "one-to-one with its input segment. Copy start_time and end_time EXACTLY "
+        "from each input segment — do not change them under any circumstances.\n\n"
+        "Content requirements:\n"
+        "1. COMPRESS aggressively. Remove ALL of the following without exception:\n"
+        "   - Audience interaction and classroom management (e.g., 'How are we doing?', "
+        "'Any questions?', 'Okay everyone', 'Pass these out')\n"
+        "   - Meta-commentary about the lecture or course (e.g., 'You've now learned 90% of Scheme', "
+        "'I'm allowed to say this because...', 'So here's the story')\n"
+        "   - Filler words and spoken hesitations (um, uh, like, you know, right, okay, so, well, etc.)\n"
+        "   - False starts, self-corrections, and repetitions of the same point\n"
+        "   - Personal anecdotes and jokes that do not convey course content\n"
+        "   If the lecturer explains the same concept multiple times for emphasis, write it ONCE clearly.\n"
+        "2. Preserve ALL technical terms, algorithm names, code identifiers, course-specific "
+        "notation, and proper nouns EXACTLY as they appear in the transcript. Do NOT introduce "
+        "any terminology, analogies, or explanations not present in the transcript.\n"
+        "3. Preserve ALL technical examples, code demonstrations, and worked problems — "
+        "rewrite them in formal prose but do not omit or abbreviate them.\n"
+        "4. Write dense flowing prose paragraphs, NOT bullet points. Every sentence must carry "
+        "information; remove transitional sentences that exist only to aid spoken comprehension.\n"
+        "5. Give each section a short descriptive title summarizing its technical content.\n\n"
+        "Return ONLY a JSON array of exactly {n} objects. Each object must have:\n"
+        '   - "title": string\n'
+        '   - "start_time": float (copied exactly from the input segment)\n'
+        '   - "end_time": float (copied exactly from the input segment)\n'
+        '   - "content": string (dense academic prose)\n\n'
+        f"Transcript segments:\n{segments_text}"
+    ).replace("{n}", str(n))
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=4096,
+    )
+    raw = (response.choices[0].message.content or "[]").strip()
+    # Strip markdown code fences if the model wraps output in ```json ... ```
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw.strip())
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            # Handle {"sections": [...]} or similar wrapper objects
+            for key in ("sections", "smart_reading", "lecture_notes", "notes"):
+                if key in parsed and isinstance(parsed[key], list):
+                    parsed = parsed[key]
+                    break
+            else:
+                parsed = list(parsed.values())[0] if parsed else []
+        return parsed if isinstance(parsed, list) else []
+    except json.JSONDecodeError:
+        logger.warning(
+            f"Smart reading: failed to parse LLM JSON response for a batch "
+            f"(raw preview: {raw[:300]!r})"
+        )
+        return []
+
+
+def generate_smart_reading_from_transcript(
+    segments: List[Dict[str, Any]],
+    model: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Convert raw video transcript segments into formal sectioned lecture notes.
+
+    Reads the same WhisperX-format segments produced by VideoConverter
+    ({start time, end time, speaker, text content}) and uses an LLM to
+    rewrite them as polished, time-aligned lecture notes suitable for reading.
+
+    Args:
+        segments: List of segment dicts with "start time", "end time",
+                  "speaker", "text content" keys (WhisperX output format).
+        model: Model name override. Defaults to VLLM_CHAT_MODEL env var,
+               then "gpt-4.1".
+
+    Returns:
+        List of {title, start_time, end_time, content, speaker} dicts ordered by
+        start_time. ``speaker`` is a string (single speaker) or list of strings
+        (merged segment with multiple speakers). Returns [] on failure — never raises.
+    """
+    if not segments:
+        return []
+    if RAG_ENV_PATH.exists():
+        load_dotenv(dotenv_path=RAG_ENV_PATH, override=True)
+    else:
+        load_dotenv(override=True)
+
+    # Filter out title/scene-label entries (speaker == "title-*" or zero-duration)
+    content_segments = [
+        s for s in segments
+        if not str(s.get("speaker", "")).startswith("title")
+        and s.get("start time", 0) != s.get("end time", 0)
+    ]
+    if not content_segments:
+        return []
+
+    import time as _time
+    model = model or os.getenv("VLLM_CHAT_MODEL", "gpt-4.1")
+    client = _get_smart_reading_client()
+
+    # Detect multi-speaker: collect unique real speakers (skip title-* and blank)
+    real_speakers = {
+        str(s.get("speaker", ""))
+        for s in content_segments
+        if s.get("speaker") and not str(s.get("speaker", "")).startswith("title")
+    }
+    is_multi_speaker = len(real_speakers) > 1
+    if is_multi_speaker:
+        logger.info(
+            f"[SmartReading] Multi-speaker detected: {sorted(real_speakers)} — "
+            "speaker field will be annotated in output sections"
+        )
+
+    # Pre-merge short segments algorithmically so timestamps are determined
+    # before the LLM is involved. The LLM then does strict 1:1 rewriting only.
+    pre_merged = _merge_short_segments(content_segments, min_duration_sec=10.0, min_words=15)
+    logger.info(
+        f"[SmartReading] Pre-merge: {len(content_segments)} segments → {len(pre_merged)} groups"
+    )
+    batches = _split_transcript_into_batches(pre_merged, batch_duration_sec=600.0)
+    results: List[Dict[str, Any]] = []
+    total_input_words = sum(len(s.get("text content", "").split()) for s in content_segments)
+    t_start = _time.perf_counter()
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _run_batch(args):
+        i, batch = args
+        t_batch = _time.perf_counter()
+        batch_result = _process_smart_reading_batch(batch, client, model)
+        elapsed_batch = _time.perf_counter() - t_batch
+        batch_input_words = sum(len(s.get("text content", "").split()) for s in batch)
+        batch_output_words = sum(len(r.get("content", "").split()) for r in batch_result)
+        logger.info(
+            f"[SmartReading] Batch {i + 1}/{len(batches)}: "
+            f"{len(batch)} segments → {len(batch_result)} sections | "
+            f"input {batch_input_words}w → output {batch_output_words}w "
+            f"({batch_input_words / batch_output_words:.1f}×) | "
+            f"time {elapsed_batch:.1f}s"
+        )
+        # Post-process: inject speaker field from pre-merged source segments.
+        for section, src_seg in zip(batch_result, batch):
+            section["speaker"] = src_seg.get("speaker", "")
+        return i, batch_result
+
+    batch_results: List[tuple] = [None] * len(batches)
+    with ThreadPoolExecutor(max_workers=len(batches)) as executor:
+        futures = {executor.submit(_run_batch, (i, batch)): i for i, batch in enumerate(batches)}
+        for future in as_completed(futures):
+            try:
+                i, batch_result = future.result()
+                batch_results[i] = batch_result
+            except Exception as e:
+                i = futures[future]
+                logger.warning(f"Smart reading batch {i + 1}/{len(batches)} failed: {e}")
+                batch_results[i] = []
+
+    for batch_result in batch_results:
+        if batch_result:
+            results.extend(batch_result)
+
+    total_elapsed = _time.perf_counter() - t_start
+    total_output_words = sum(len(r.get("content", "").split()) for r in results)
+    compression = (
+        f"{total_input_words / total_output_words:.1f}×" if total_output_words else "N/A"
+    )
+    logger.info(
+        f"[SmartReading] TOTAL: {len(content_segments)} segments → {len(results)} sections | "
+        f"input {total_input_words}w → output {total_output_words}w "
+        f"({compression} compression) | "
+        f"total time {total_elapsed:.1f}s ({total_elapsed / 60:.1f} min)"
+    )
+    return results
     return transcript_list[position]["start time"]

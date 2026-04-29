@@ -12,11 +12,20 @@ from app.core.models.chat_completion import Message
 SAMPLING_PARAMS = {
     "temperature": 0.6,
     "top_p": 0.95,
-    "max_tokens": 2000,
+    "max_tokens": 3000,
     "extra_body": {
-        "top_k": 20,
-        "min_p": 0,
-        "chat_template_kwargs": {"thinking_budget": 512},
+        "skip_special_tokens": False,
+        "chat_template_kwargs": {"enable_thinking": True, "budget_tokens": 1024},
+    }
+}
+
+# Sampling parameters with thinking disabled (for query reformulation, etc.)
+SAMPLING_PARAMS_NO_THINK = {
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "max_tokens": 512,
+    "extra_body": {
+        "chat_template_kwargs": {"enable_thinking": False},
     }
 }
 

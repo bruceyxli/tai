@@ -26,7 +26,7 @@ pydantic-settings = "*"
 
 # Database
 sqlalchemy = "*"
-sqlite-vss = "*"
+# sqlite-vss = "*"  # Not available on Windows
 pymongo = "*"
 
 # AI/ML for backend

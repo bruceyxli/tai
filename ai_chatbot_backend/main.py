@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.admin import setup_admin
 from app.api.router import api_router
@@ -159,6 +160,10 @@ async def database_status():
             "error": str(e),
             "message": "Failed to get database status",
         }
+
+
+# Serve static files (chat frontend)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 if __name__ == "__main__":

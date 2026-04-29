@@ -16,7 +16,8 @@ def get_vllm_chat_client():
     """Returns an AsyncOpenAI client configured for vLLM chat/responses API."""
     return AsyncOpenAI(
         base_url=settings.vllm_chat_url,
-        api_key=settings.vllm_api_key
+        api_key=settings.vllm_api_key,
+        timeout=60.0,
     )
 
 

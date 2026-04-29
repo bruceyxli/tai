@@ -37,9 +37,19 @@ class VideoConverter(BaseConverter):
         result = model.transcribe(audio, batch_size=batch_size)
         model_a, metadata = whisperx.load_align_model(language_code="en", device=device)
         result = whisperx.align(result["segments"], model_a, metadata, audio, device, return_char_alignments=False)
-        diarize_model = whisperx.diarize.DiarizationPipeline(use_auth_token=True, device=device)
-        diarize_segments = diarize_model(audio)
-        result = whisperx.assign_word_speakers(diarize_segments, result)
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        if hf_token:
+            try:
+                try:
+                    diarize_model = whisperx.diarize.DiarizationPipeline(token=hf_token, device=device)
+                except TypeError:
+                    diarize_model = whisperx.diarize.DiarizationPipeline(use_auth_token=hf_token, device=device)
+                diarize_segments = diarize_model(audio)
+                result = whisperx.assign_word_speakers(diarize_segments, result)
+            except Exception as e:
+                print(f"[WARN] Speaker diarization failed, continuing without speaker labels: {e}")
+        else:
+            print("[INFO] HF_TOKEN not set, skipping speaker diarization")
         segments = []
         if "segments" in result:
             for segment in result["segments"]:
@@ -47,7 +57,7 @@ class VideoConverter(BaseConverter):
                     "start": segment["start"],
                     "end": segment["end"],
                     "text": segment["text"],
-                    "speaker": segment["speaker"] if "speaker" in segment else "UNKNOWN"
+                    "speaker": segment.get("speaker", "UNKNOWN")
                 }
                 segments.append(segment_dict)
         return segments

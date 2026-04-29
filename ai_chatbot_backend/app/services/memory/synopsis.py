@@ -107,15 +107,17 @@ async def _llm_synopsis_from_transcript(
     }
     chat = [sys_msg, usr]
 
-    # Generate the synopsis using the OpenAI API with JSON mode
+    # Generate the synopsis using the OpenAI API with JSON mode (no thinking needed)
     response = await engine.chat.completions.create(
         model=settings.vllm_chat_model,
         messages=chat,
-        temperature=0.0,
-        top_p=1.0,
+        temperature=0.7,
+        top_p=0.8,
         max_tokens=800,
         response_format={"type": "json_object"},
-        extra_body={"guided_json": MEMORY_SYNOPSIS_JSON_SCHEMA}
+        extra_body={"guided_json": MEMORY_SYNOPSIS_JSON_SCHEMA,
+                    "top_k": 20, "min_p": 0, "presence_penalty": 1.5,
+                    "chat_template_kwargs": {"enable_thinking": False}}
     )
 
     # vLLM with --reasoning-parser separates reasoning_content from content
@@ -173,15 +175,17 @@ async def _llm_merge_synopses(
     usr_msg = {"role": "user", "content": _LLM_MERGE_USER_TEMPLATE.format(old_json=old_json, new_json=new_json)}
     chat = [sys_msg, usr_msg]
 
-    # Generate the merged synopsis using the OpenAI API
+    # Generate the merged synopsis using the OpenAI API (no thinking needed)
     response = await engine.chat.completions.create(
         model=settings.vllm_chat_model,
         messages=chat,
-        temperature=0.0,
-        top_p=1.0,
+        temperature=0.7,
+        top_p=0.8,
         max_tokens=800,
         response_format={"type": "json_object"},
-        extra_body={"guided_json": MEMORY_SYNOPSIS_JSON_SCHEMA}
+        extra_body={"guided_json": MEMORY_SYNOPSIS_JSON_SCHEMA,
+                    "top_k": 20, "min_p": 0, "presence_penalty": 1.5,
+                    "chat_template_kwargs": {"enable_thinking": False}}
     )
 
     # vLLM with --reasoning-parser separates reasoning_content from content

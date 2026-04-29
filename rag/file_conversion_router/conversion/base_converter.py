@@ -1,6 +1,7 @@
 """Base classes for all file type converters."""
 import string
 import logging
+import json
 import yaml
 import re
 from abc import ABC, abstractmethod
@@ -172,7 +173,34 @@ class BaseConverter(ABC):
         logger.info(f"📄 Expected Markdown Path: {self._md_path}")
         page, metadata = self._to_page(input_path, self._md_path)
         logger.info(f"✅ Page conversion completed for {input_path}.")
-        chunks = page.to_chunk()
+        smart_reading = metadata.get("smart_reading")
+        if smart_reading and self.file_type in ("mp4", "mkv", "webm", "mov"):
+            # Build one chunk per smart_reading section (bypass merge_short_segments
+            # which would collapse short sections into one).
+            import uuid as _uuid
+            chunks = []
+            for idx, sec in enumerate(smart_reading, start=1):
+                title = sec.get("title", "")
+                t_start = sec.get("start_time", 0)
+                t_end = sec.get("end_time", 0)
+                body = sec.get("content", "")
+                content = f"## {title}\n[{t_start:.1f}s - {t_end:.1f}s]\n{body}"
+                chunks.append(Chunk(
+                    chunk_index=idx,
+                    content=content,
+                    titles=(title,),
+                    chunk_url=metadata.get("URL", ""),
+                    index=idx,
+                    is_split=False,
+                    file_path=input_path,
+                    file_uuid=self.file_uuid,
+                    chunk_uuid=str(_uuid.uuid4()),
+                    reference_path=f"{self.file_name} > {title}",
+                    course_name=self.course_name,
+                    course_code=self.course_code,
+                ))
+        else:
+            chunks = page.to_chunk()
         logger.info("✅ Successfully converted page content to chunks.")
         return chunks, metadata
 
@@ -215,7 +243,38 @@ class BaseConverter(ABC):
         with open(metadata_path, "w", encoding="utf-8") as yaml_file:
             yaml.safe_dump(metadata, yaml_file, allow_unicode=True)
         url = metadata.get("URL")
-        content = {"text": structured_md}
+        # For video files: embed smart_reading sections instead of raw transcript.
+        # Each section (title + content + timestamps) becomes a searchable chunk,
+        # giving users dense, formal text rather than oral transcript noise.
+        smart_reading_sections = content_dict.get("smart_reading") if content_dict else None
+        page_index_helper = self.index_helper
+        if smart_reading_sections and self.file_type in ("mp4", "mkv", "webm", "mov"):
+            sr_lines = []
+            for sec in smart_reading_sections:
+                title = sec.get("title", "")
+                t_start = sec.get("start_time", 0)
+                t_end = sec.get("end_time", 0)
+                body = sec.get("content", "")
+                sr_lines.append(f"## {title}\n[{t_start:.1f}s - {t_end:.1f}s]\n{body}")
+            embed_text = "\n\n".join(sr_lines)
+            # Build index_helper from smart_reading titles so Page can chunk by section.
+            # Scan embed_text line-by-line to get exact line numbers for each ## header.
+            page_index_helper = {}
+            for lineno, line in enumerate(embed_text.splitlines(), start=1):
+                if line.startswith("## "):
+                    title = line[3:].strip()
+                    idx = len(page_index_helper) + 1
+                    page_index_helper[(title,)] = (idx, lineno)
+            # Persist the markdown version alongside the raw transcript
+            sr_md_path = md_path.parent / f"{md_path.name}_smart_reading.md"
+            try:
+                with open(sr_md_path, "w", encoding="utf-8") as f:
+                    f.write(embed_text)
+            except Exception as e:
+                logger.warning(f"Failed to save smart reading markdown for {self.file_name}: {e}")
+        else:
+            embed_text = structured_md
+        content = {"text": embed_text}
         return Page(
             course_name=self.course_name,
             course_code=self.course_code,
@@ -223,7 +282,7 @@ class BaseConverter(ABC):
             content=content,
             page_name=self.file_name,
             page_url=url,
-            index_helper=self.index_helper,
+            index_helper=page_index_helper,
             file_path=self.relative_path,
             file_uuid=self.file_uuid,
         ), metadata
@@ -253,6 +312,8 @@ class BaseConverter(ABC):
             metadata_content["recap_questions"] = content_dict['recap_questions']
         if self.file_type == "ipynb":
             metadata_content["problems"] = self.process_problems(content_dict)
+        if content_dict.get('smart_reading') is not None:
+            metadata_content["smart_reading"] = content_dict['smart_reading']
         return metadata_content
 
     def match_a_title_and_b_title(self, a_titles: str, b_titles: str, operator):
@@ -571,6 +632,16 @@ class BaseConverter(ABC):
             add_titles_to_json(index_helper=self.index_helper, json_file_path=json_path)
             # Group sentences in transcript to reduce list length (after adding titles)
             group_sentences_in_transcript(str(json_path), max_time_gap=5.0, max_words=200)
+
+            # Generate smart reading: formal lecture notes with timestamp alignment
+            try:
+                with open(json_path, "r", encoding="utf-8") as _f:
+                    _transcript_segments = json.load(_f)
+                content_dict["smart_reading"] = generate_smart_reading_from_transcript(_transcript_segments)
+            except Exception as _e:
+                logging.warning(f"Smart reading generation failed for {input_md_path}: {_e}")
+                content_dict["smart_reading"] = []
+
         elif file_type == "ipynb":
             content_dict = get_strutured_content_for_ipynb(
                 md_content=content_text,

@@ -14,7 +14,7 @@ from file_conversion_router.embedding.file_embedding_create import (
 )
 
 
-def convert_directory(input_config: Union[str, Path], auto_embed: bool = True) -> None:
+def convert_directory(input_config: Union[str, Path], auto_embed: bool = True, save_smart_reading_json: bool = True) -> None:
     """Convert all supported files in the given directory to Markdown format and optionally create embeddings.
 
     Current supported file types:
@@ -24,6 +24,9 @@ def convert_directory(input_config: Union[str, Path], auto_embed: bool = True) -
     Args:
         input_config: Path to the configuration YAML file
         auto_embed: Whether to automatically create embeddings after conversion (default: True)
+        save_smart_reading_json: Whether to save smart reading output as a sidecar JSON file
+                                 alongside the converted markdown (default: True).
+                                 Set to False to store smart reading in DB only.
     """
     data = load_yaml(str(input_config))
     input_dir = data["input_dir"]
@@ -41,6 +44,7 @@ def convert_directory(input_config: Union[str, Path], auto_embed: bool = True) -
         course_id,
         log_dir=log_dir,
         db_path=db_path,
+        save_smart_reading_json=save_smart_reading_json,
     )
 
     # Auto-create embeddings if enabled and database path exists
@@ -67,13 +71,14 @@ def convert_directory(input_config: Union[str, Path], auto_embed: bool = True) -
             # Continue processing - embedding failure shouldn't stop the pipeline
 
 
-def process_courses_from_master_config(master_config_path: Optional[str] = None, auto_embed: bool = True) -> None:
+def process_courses_from_master_config(master_config_path: Optional[str] = None, auto_embed: bool = True, save_smart_reading_json: bool = True) -> None:
     """Process all courses marked for update in the master configuration file.
 
     Args:
         master_config_path: Path to the master configuration file.
                           Defaults to courses_master_config.yaml in configs directory.
         auto_embed: Whether to automatically create embeddings after each course conversion (default: True)
+        save_smart_reading_json: Whether to save smart reading output as a sidecar JSON file (default: True)
     """
     if master_config_path is None:
         master_config_path = Path(__file__).parent.parent / "configs" / "courses_master_config.yaml"
@@ -105,7 +110,7 @@ def process_courses_from_master_config(master_config_path: Optional[str] = None,
     for course_name, config_path in courses_to_process:
         try:
             logging.info(f"Starting processing for course: {course_name}")
-            convert_directory(config_path, auto_embed=auto_embed)
+            convert_directory(config_path, auto_embed=auto_embed, save_smart_reading_json=save_smart_reading_json)
             processed_courses.append(course_name)
             logging.info(f"Successfully processed course: {course_name}")
         except Exception as e:
